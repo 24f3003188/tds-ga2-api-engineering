@@ -8,15 +8,6 @@ import math
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Retry-After"],
-)
-
 T = 40
 R = 19
 WINDOW = 10
@@ -57,9 +48,9 @@ def list_orders(
 
     if cursor:
         try:
-            offset = int(
-                base64.urlsafe_b64decode(cursor.encode()).decode()
-            )
+            offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
+            if offset < 0:
+                raise ValueError
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid cursor")
 
@@ -72,14 +63,12 @@ def list_orders(
             str(next_offset).encode()
         ).decode()
 
-    return {
-        "items": items,
-        "next_cursor": next_cursor
-    }
+    return {"items": items, "next_cursor": next_cursor}
 
 
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
+    # Let CORS preflight through untouched
     if request.method == "OPTIONS":
         return await call_next(request)
 
@@ -88,24 +77,26 @@ async def rate_limit(request: Request, call_next):
 
     with lock:
         timestamps = rate_buckets.setdefault(client_id, [])
-        timestamps[:] = [
-            t for t in timestamps if now - t < WINDOW
-        ]
+        timestamps[:] = [t for t in timestamps if now - t < WINDOW]
 
         if len(timestamps) >= R:
-            retry_after = max(
-                1,
-                math.ceil(WINDOW - (now - timestamps[0]))
-            )
+            retry_after = max(1, math.ceil(WINDOW - (now - timestamps[0])))
             return Response(
                 content='{"detail":"Rate limit exceeded"}',
                 status_code=429,
-                headers={
-                    "Retry-After": str(retry_after),
-                    "Content-Type": "application/json"
-                }
+                media_type="application/json",
+                headers={"Retry-After": str(retry_after)},
             )
 
         timestamps.append(now)
 
     return await call_next(request)
+
+
+# IMPORTANT: added LAST so it is the OUTERMOST middleware.
+# This guarantees CORS headers appear on every response, including 429s.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
